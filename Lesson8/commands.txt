@@ -1,0 +1,47 @@
+1. Найдите общее количество учеников для каждого курса. В отчёт выведите название курса и количество учеников по всем потокам курса. Решите задание с применением оконных функций.
+SELECT DISTINCT
+  courses.name AS course_name,
+  SUM(students_amount) OVER(PARTITION BY courses.id) AS total_students
+  FROM streams JOIN courses ON courses.id = streams.course_id;
+
+2. Найдите среднюю оценку по всем потокам для всех учителей. В отчёт выведите идентификатор, фамилию и имя учителя, среднюю оценку по всем проведённым потокам. Учителя, у которых не было потоков, также должны попасть в выборку. Решите задание с применением оконных функций.
+SELECT DISTINCT
+  teachers.id,
+  surname,
+  name,
+  AVG(performance) OVER(PARTITION BY teachers.id) AS avg_performance
+  FROM teachers LEFT JOIN grades ON teachers.id = grades.teacher_id;
+
+3. Какие индексы надо создать для максимально быстрого выполнения представленного запроса?
+Честно говоря, здесь я не вполне уверен, поскольку не знаю, в каком порядке SQLite "под капотом" будет исполнять запрос.
+
+Если SQLite сначала формирует виртуальную таблицу на основе FROM-JOIN-JOIN - перебирая базовую таблицу academic_performance и для каждой строки подбирая подходящие строки из teachers и streams - а потом уже ее фильтрует по number (именно так, как я понимаю, работает абстрактная теоретическая модель SQL СУБД) - то понадобятся индексы по teachers.id и streams.id (и они должны существовать и так, поскольку это первичные ключи), а вот индекс по streams.number, вероятно, дело не ускорит, поскольку фильтроваться будет уже объединенная виртуальная таблица, а не исходная индексированная. Возможно, поможет составной индекс streams по id и number, чтобы можно было извлекать сразу данные для данного id и с фильтрацией по number.
+
+Если же SQLite умеет оптимизировать запросы, и сначала к таблице streams будет применен фильтр number >= 200, а уже потом для этих потоков будут подключаться academic_performance, а потом для них teachers - то понадобятся индексы по streams.number, cademic_performance.stream_id и teachers.id (последний, вероятно, будет создан автоматически, т.к. id первичный ключ).
+
+4. Установите SQLiteStudio, подключите базу данных учителей, выполните в графическом клиенте любой запрос.
+Я сделал запрос, выводящий всю имеющуюся информацию по курсам - JOIN всех четырех таблиц - с сортировкой по названиям курсов и фамилиям преподавателей.
+SELECT * FROM grades
+  JOIN teachers ON teachers.id = grades.teacher_id
+  JOIN streams ON streams.id = grades.stream_id
+  JOIN courses ON courses.id = streams.course_id
+ORDER BY courses.name, teachers.surname;
+результат запроса приведен на скриншоте.
+
+5. Дополнительное задание. Для каждого преподавателя выведите имя, фамилию, минимальное значение успеваемости по всем потокам преподавателя, название курса, который соответствует потоку с минимальным значением успеваемости, максимальное значение успеваемости по всем потокам преподавателя, название курса, соответствующий потоку с максимальным значением успеваемости, дату начала следующего потока. Выполните задачу с использованием оконных функций.
+SELECT DISTINCT
+    teachers.name,
+    teachers.surname,
+    FIRST_VALUE(performance) OVER(w_performance ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS min_performance,
+    FIRST_VALUE(courses.name) OVER(w_performance ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS course_min_performance,
+    LAST_VALUE(performance) OVER(w_performance ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS max_performance,
+    LAST_VALUE(courses.name) OVER(w_performance ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS course_max_performance,
+    MIN(streams.started_at) FILTER(WHERE streams.started_at > DATE('now')) OVER(PARTITION BY teachers.id) AS next_stream_date
+  FROM grades
+    JOIN teachers ON teachers.id = grades.teacher_id
+    JOIN streams ON streams.id = grades.stream_id
+    JOIN courses ON courses.id = streams.course_id
+  WINDOW w_performance AS (PARTITION BY teachers.id ORDER BY performance ASC);
+
+Я не знаю, насколько это оптимальное решение, но это работает, хотя пришлось повозиться.
+Получить минимальное и максимальное значение успеваемости можно было бы и просто через MIN/MAX, но вот чтобы получить соответствующие названия курсов, я придумал сделать в окне сортировку и брать данные из первой и последней строки. Сначала я описал два разных окна по PERFORMANCE с разной сортировкой - ASC и DESC и сделал в них FIRST_VALUE; потом я обнаружил, что есть еще функция LAST_VALUE, но сначала она сработала неправильно, и я не понимал в чем дело. Потом почитал документацию и выяснил, что по умолчанию окно включает строки только от начала до текущей, и с добавлением конструкции ROWS с явным указанием, что надо брать все строки, все получилось. Только почему-то SQLite не разрешил мне включить эту конструкцию в описание окна, так что пришлось повторять каждый раз при использовании.
